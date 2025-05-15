@@ -9,13 +9,41 @@
 	let map;
 	let stations = [];
 	let trips = [];
+
 	let arrivals, departures;
 	let mapViewChanged = 0;
 
-	// Scale for circle radius (reactive)
+	let timeFilter = -1;
+	$: timeFilterLabel = new Date(0, 0, 0, 0, timeFilter)
+		.toLocaleString("en", { timeStyle: "short" });
+
+	function minutesSinceMidnight(date) {
+		return date.getHours() * 60 + date.getMinutes();
+	}
+
+	// Reactive filtered data
+	$: filteredTrips = timeFilter === -1 ? trips : trips.filter(trip => {
+		const started = minutesSinceMidnight(trip.started_at);
+		const ended = minutesSinceMidnight(trip.ended_at);
+		return Math.abs(started - timeFilter) <= 60 || Math.abs(ended - timeFilter) <= 60;
+	});
+
+	$: filteredDepartures = d3.rollup(filteredTrips, v => v.length, d => d.start_station_id);
+	$: filteredArrivals = d3.rollup(filteredTrips, v => v.length, d => d.end_station_id);
+
+	$: filteredStations = stations.map(s => {
+		let station = { ...s }; // clone para não mutar os dados originais
+		const id = station.id;
+		station.arrivals = filteredArrivals.get(id) ?? 0;
+		station.departures = filteredDepartures.get(id) ?? 0;
+		station.totalTraffic = station.arrivals + station.departures;
+		return station;
+	});
+
+	// Raio dos círculos, dependente do filtro
 	$: radiusScale = d3.scaleSqrt()
-		.domain([0, d3.max(stations, d => d.totalTraffic) || 0])
-		.range([0, 25]);
+		.domain([0, d3.max(filteredStations, d => d.totalTraffic) || 0])
+		.range(timeFilter === -1 ? [0, 25] : [3, 30]);
 
 	async function initMap() {
 		map = new mapboxgl.Map({
@@ -48,49 +76,38 @@
 	}
 
 	async function loadStationData() {
-		try {
-			const csvUrl = 'https://vis-society.github.io/labs/8/data/bluebikes-stations.csv';
-			const data = await d3.csv(csvUrl);
+		const csvUrl = 'https://vis-society.github.io/labs/8/data/bluebikes-stations.csv';
+		const data = await d3.csv(csvUrl);
 
-			stations = data.map(station => ({
-				id: station.Number,
-				name: station.NAME,
-				Lat: +station.Lat,
-				Long: +station.Long,
-			}));
-		} catch (error) {
-			console.error('Error loading station data:', error);
-		}
+		stations = data.map(station => ({
+			id: station.Number,
+			name: station.NAME,
+			Lat: +station.Lat,
+			Long: +station.Long,
+		}));
 	}
 
 	async function loadStationDemand() {
-		try {
-			const csvUrl = 'https://vis-society.github.io/labs/8/data/bluebikes-traffic-2024-03.csv';
-			const data = await d3.csv(csvUrl);
+		const csvUrl = 'https://vis-society.github.io/labs/8/data/bluebikes-traffic-2024-03.csv';
+		trips = await d3.csv(csvUrl).then(trips => {
+			for (let trip of trips) {
+				trip.started_at = new Date(trip.started_at);
+				trip.ended_at = new Date(trip.ended_at);
+			}
+			return trips;
+		});
 
-			trips = data.map(trip => ({
-				id: trip.ride_id,
-				started_at: new Date(trip.started_at),
-				ended_at: new Date(trip.ended_at),
-				start_station_id: trip.start_station_id,
-				end_station_id: trip.end_station_id
-			}));
+		departures = d3.rollup(trips, v => v.length, d => d.start_station_id);
+		arrivals = d3.rollup(trips, v => v.length, d => d.end_station_id);
 
-			// Calcula partidas e chegadas
-			departures = d3.rollup(trips, v => v.length, d => d.start_station_id);
-			arrivals = d3.rollup(trips, v => v.length, d => d.end_station_id);
-
-			// Atualiza estações com os dados de tráfego
-			stations = stations.map(station => {
-				const id = station.id;
-				station.arrivals = arrivals.get(id) ?? 0;
-				station.departures = departures.get(id) ?? 0;
-				station.totalTraffic = station.arrivals + station.departures;
-				return station;
-			});
-		} catch (error) {
-			console.error('Error loading traffic data:', error);
-		}
+		// Estações com dados de tráfego inicial
+		stations = stations.map(station => {
+			const id = station.id;
+			station.arrivals = arrivals.get(id) ?? 0;
+			station.departures = departures.get(id) ?? 0;
+			station.totalTraffic = station.arrivals + station.departures;
+			return station;
+		});
 	}
 
 	function getCoords(station) {
@@ -110,6 +127,26 @@
 <style>
 	@import url("$lib/global.css");
 
+	header {
+		display: flex;
+		align-items: baseline;
+		gap: 1em;
+		margin-bottom: 1em;
+	}
+
+	label {
+		margin-left: auto;
+	}
+
+	time, em {
+		display: block;
+	}
+
+	em {
+		color: #888;
+		font-style: italic;
+	}
+
 	#map {
 		position: relative;
 		width: 100%;
@@ -125,13 +162,23 @@
 	}
 </style>
 
-<h1>Welcome to SvelteKit</h1>
-<p>Visit <a href="https://kit.svelte.dev">kit.svelte.dev</a> to read the documentation</p>
+<header>
+	<h1>🚲 BikeWatch</h1>
+	<label>
+		Filter by time:
+		<input type="range" min="-1" max="1440" bind:value={timeFilter} />
+		{#if timeFilter !== -1}
+			<time>{timeFilterLabel}</time>
+		{:else}
+			<em>(any time)</em>
+		{/if}
+	</label>
+</header>
 
 <div id="map">
 	<svg>
 		{#key mapViewChanged}
-			{#each stations as station}
+			{#each filteredStations as station}
 				<circle
 					{...getCoords(station)}
 					r={radiusScale(station.totalTraffic)}
@@ -143,3 +190,4 @@
 		{/key}
 	</svg>
 </div>
+
